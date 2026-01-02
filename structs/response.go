@@ -64,7 +64,7 @@ func RespondError(w http.ResponseWriter, httpcode int, awscode string, err error
 		Resource: resource,
 	}
 
-	log.Print(">>> RespondError >>>", err, awscode)
+	log.Printf(">>> RespondError >>> %s, %s", err, awscode)
 
 	out, _ := xml.MarshalIndent(e, " ", "  ")
 	w.Header().Set("Content-Type", "application/xml")

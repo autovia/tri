@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/autovia/tri/fs"
@@ -48,7 +49,7 @@ func ListObjectsV2(w http.ResponseWriter, r *http.Request) error {
 				Key:          fileInfo.Name(),
 				LastModified: t.Format(ISO8601UTCFormat),
 				Size:         fileInfo.Size(),
-				ETag:         etag,
+				ETag:         "\"" + etag + "\"",
 				StorageClass: "STANDARD"})
 		} else {
 			prefixes = append(prefixes, S.CommonPrefix{Prefix: fileInfo.Name() + "/"})
@@ -124,7 +125,7 @@ func CopyObject(w http.ResponseWriter, r *http.Request) error {
 	t := stats.ModTime()
 	return S.RespondXML(w, http.StatusOK, S.CopyObjectResult{
 		LastModified: t.Format(ISO8601UTCFormat),
-		ETag:         etag,
+		ETag:         "\"" + etag + "\"",
 	})
 }
 
@@ -146,24 +147,71 @@ func CreateMultipartUpload(w http.ResponseWriter, r *http.Request) error {
 		return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
 	}
 
-	newfile := filepath.Join(metapath, s3.Key)
-	if _, err := os.Stat(filepath.Dir(newfile)); os.IsNotExist(err) {
-		err := os.MkdirAll(filepath.Dir(newfile), os.ModePerm)
-		if err != nil {
-			return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
-		}
-	}
-
-	f, err := os.Create(newfile)
-	if err != nil {
-		return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
-	}
-	defer f.Close()
-
 	return S.RespondXML(w, http.StatusOK, S.InitiateMultipartUploadResponse{
 		Bucket:   s3.Bucket,
 		Key:      s3.Key,
 		UploadID: uploadID,
+	})
+}
+
+func CompleteMultipartUpload(w http.ResponseWriter, r *http.Request) error {
+	log.Printf("#CompleteMultipartUpload: %v\n", r)
+	s3 := r.Context().Value(S.Request{}).(S.Request)
+
+	metapath := filepath.Join(s3.Mount, Metadata, r.URL.Query().Get("uploadId"))
+	if _, err := os.Stat(metapath); os.IsNotExist(err) {
+		return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
+	}
+
+	body, _ := io.ReadAll(r.Body)
+	var cmu S.CompleteMultipartUpload
+	err := xml.Unmarshal(body, &cmu)
+	if err != nil {
+		return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
+	}
+
+	outFile, err := os.Create(s3.Path)
+	if err != nil {
+		return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
+	}
+	defer outFile.Close()
+
+	var n int64
+	h := md5.New()
+	for _, part := range cmu.PartNumbers {
+		fn := filepath.Join(metapath, fmt.Sprintf("%v", part))
+		etag, err := fs.Getxattr(fn, "etag")
+		if err != nil {
+			return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
+		}
+		h.Write([]byte(etag))
+		n++
+		partFile, err := os.Open(fn)
+		if err != nil {
+			return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
+		}
+		_, err = io.Copy(outFile, partFile)
+		if err != nil {
+			return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
+		}
+		partFile.Close()
+		err = os.Remove(fn)
+		if err != nil {
+			return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
+		}
+	}
+	err = os.Remove(metapath)
+	if err != nil {
+		return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
+	}
+
+	dashTag := append(h.Sum(nil), '-')
+	finalETag := strconv.AppendInt(dashTag, n, 10)
+
+	return S.RespondXML(w, http.StatusOK, S.CompleteMultipartUpload{
+		Bucket: s3.Bucket,
+		Key:    s3.Key,
+		ETag:   fmt.Sprintf("\"%s\"", finalETag),
 	})
 }
 
@@ -218,6 +266,44 @@ func PutObject(w http.ResponseWriter, r *http.Request) error {
 	return S.Respond(w, http.StatusOK, nil, nil)
 }
 
+func UploadPart(w http.ResponseWriter, r *http.Request) error {
+	log.Printf("#UploadPart: %v\n", r)
+	s3 := r.Context().Value(S.Request{}).(S.Request)
+
+	uploadID := filepath.Join(s3.Mount, Metadata, r.URL.Query().Get("uploadId"))
+	partNumber := filepath.Join(uploadID, r.URL.Query().Get("partNumber"))
+	if _, err := os.Stat(uploadID); os.IsNotExist(err) {
+		return S.RespondError(w, http.StatusBadRequest, "InternalError", err, s3.Key)
+	}
+
+	targetFile, err := os.Create(partNumber)
+	if err != nil {
+		return S.RespondError(w, http.StatusBadRequest, "InternalError", err, s3.Key)
+	}
+	defer targetFile.Close()
+	defer r.Body.Close()
+
+	fileBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		return S.RespondError(w, http.StatusBadRequest, "InternalError", err, s3.Key)
+	}
+	hash := md5.Sum(fileBytes)
+	etag := hex.EncodeToString(hash[:])
+
+	_, err = targetFile.Write(fileBytes)
+	if err != nil {
+		return S.RespondError(w, http.StatusBadRequest, "InternalError", err, s3.Key)
+	}
+
+	err = fs.Setxattr(partNumber, "etag", etag)
+	if err != nil {
+		return S.RespondError(w, http.StatusBadRequest, "InternalError", err, s3.Key)
+	}
+
+	w.Header().Set("ETag", "\""+etag+"\"")
+	return S.Respond(w, http.StatusOK, nil, nil)
+}
+
 func HeadObject(w http.ResponseWriter, r *http.Request) error {
 	log.Printf("#HeadObject: %v\n", r)
 	s3 := r.Context().Value(S.Request{}).(S.Request)
@@ -239,7 +325,7 @@ func HeadObject(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return S.RespondError(w, http.StatusInternalServerError, "InternalError", err, s3.Key)
 	}
-	headers["ETag"] = etag
+	headers["ETag"] = "\"" + etag + "\""
 
 	return S.Respond(w, http.StatusOK, headers, nil)
 }
@@ -374,8 +460,6 @@ func DeleteObjects(w http.ResponseWriter, r *http.Request) error {
 			objects = append(objects, obj)
 		}
 	}
-
-	log.Print(">>> DEL: ", objects)
 
 	return S.RespondXML(w, http.StatusOK, S.DeleteObjectsResponse{
 		DeletedObjects: objects,

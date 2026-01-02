@@ -12,7 +12,7 @@ type Auth struct {
 }
 
 func (a Auth) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	log.Printf("AuthHandler %v\n%v", r, a.R)
+	//log.Printf("AuthHandler %v\n%v", r, a.R)
 
 	if _, ok := a.R[r.Method]; !ok {
 		log.Print("http method not allowed")

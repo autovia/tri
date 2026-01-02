@@ -3,7 +3,6 @@ package structs
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"net/url"
 	"path/filepath"
@@ -47,7 +46,7 @@ func (app *App) ParseRequest(r *http.Request) (*http.Request, error) {
 			bucket = split[0]
 			key, _ = strings.CutPrefix(uPath, bucket+"/")
 			path = filepath.Clean(filepath.Join(*app.Mount, bucket, key))
-			log.Printf(">>> bucket: %s, key: %s, path: %s, split: %v\n", bucket, key, path, split)
+			//log.Printf(">>> bucket: %s, key: %s, path: %s, split: %v\n", bucket, key, path, split)
 		}
 
 		// check prefix

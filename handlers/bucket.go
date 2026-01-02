@@ -45,7 +45,10 @@ func CreateBucket(w http.ResponseWriter, r *http.Request) error {
 		return S.RespondError(w, 500, "InternalError", err, s3.Bucket)
 	}
 
-	return S.RespondXML(w, http.StatusOK, nil)
+	w.Header().Set("Location", s3.Key)
+	w.Header().Set("Content-Length", "0")
+	w.Header().Set("Server", "AmazonS3")
+	return S.Respond(w, http.StatusOK, nil, nil)
 }
 
 func HeadBucket(w http.ResponseWriter, r *http.Request) error {

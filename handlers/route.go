@@ -44,6 +44,9 @@ func Put(w http.ResponseWriter, r *http.Request) error {
 		if len(r.Header.Get("X-Amz-Copy-Source")) > 0 {
 			return CopyObject(w, r)
 		}
+		if r.URL.Query().Has("partNumber") && r.URL.Query().Has("uploadId") {
+			return UploadPart(w, r)
+		}
 		return PutObject(w, r)
 	}
 
@@ -55,6 +58,10 @@ func Post(w http.ResponseWriter, r *http.Request) error {
 
 	if r.URL.Query().Has("uploads") {
 		return CreateMultipartUpload(w, r)
+	}
+
+	if r.URL.Query().Has("uploadId") {
+		return CompleteMultipartUpload(w, r)
 	}
 
 	if r.URL.Query().Has("delete") {
